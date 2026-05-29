@@ -47,7 +47,7 @@ jobs:
 
       # ✅ OIDC: Obtener credenciales de corta duración
       - name: Configure AWS credentials (OIDC)
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: arn:aws:iam::123456789012:role/github-actions-staging
           aws-region: us-east-1

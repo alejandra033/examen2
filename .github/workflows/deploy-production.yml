@@ -78,7 +78,7 @@ jobs:
 
       # ✅ Configurar credenciales AWS usando OIDC (alternativa a secrets)
       - name: Configure AWS credentials via OIDC
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@v6
         with:
           # Rol que confía en GitHub OIDC provider
           role-to-assume: arn:aws:iam::123456789012:role/github-actions-production
@@ -214,7 +214,7 @@ jobs:
       id-token: write
     steps:
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: arn:aws:iam::123456789012:role/github-actions-production
           aws-region: us-east-1
