@@ -1,0 +1,138 @@
+name: Deploy Staging - Automatic
+
+on:
+  push:
+    branches:
+      - develop
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy to'
+        default: 'staging'
+        type: choice
+        options:
+          - staging
+
+# Permisos globales mínimos
+permissions:
+  contents: read
+  id-token: write  # Requerido para OIDC
+
+jobs:
+  deploy-staging:
+    name: Deploy to Staging
+    runs-on: ubuntu-latest
+    environment:
+      name: staging
+      url: https://staging-api.example.com
+    # Permisos específicos: solo lo necesario
+    permissions:
+      contents: read
+      id-token: write
+      deployments: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@2541b1294d2704b0964813337f33b291d3f8596b  # v4.1.1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@1a4442caab129478691007574fcc35b32ff21d5e  # v3.8.1
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build application
+        run: npm run build
+
+      # ✅ OIDC: Obtener credenciales de corta duración
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::123456789012:role/github-actions-staging
+          aws-region: us-east-1
+          role-session-name: GitHubActions-${{ github.run_id }}
+          role-duration-seconds: 900  # 15 minutos
+
+      - name: Create deployment
+        id: deployment
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const deployment = await github.rest.repos.createDeployment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              ref: context.ref,
+              environment: 'staging',
+              description: 'Deploy via GitHub Actions',
+              auto_merge: false,
+              required_contexts: []
+            });
+            core.setOutput('deployment_id', deployment.data.id);
+
+      # ✅ Deploy con credenciales de AWS via OIDC
+      - name: Deploy to AWS ECS Staging
+        env:
+          AWS_REGION: us-east-1
+        run: |
+          # Las credenciales vienen de OIDC, no de secrets hardcodeados
+          aws ecs update-service \
+            --cluster staging-cluster \
+            --service app-service \
+            --force-new-deployment \
+            --region $AWS_REGION
+
+      - name: Update deployment status (success)
+        if: success()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.repos.createDeploymentStatus({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              deployment_id: ${{ steps.deployment.outputs.deployment_id }},
+              state: 'success',
+              environment_url: 'https://staging-api.example.com',
+              description: 'Deployment successful',
+              auto_inactive: false
+            });
+
+      - name: Update deployment status (failure)
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.repos.createDeploymentStatus({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              deployment_id: ${{ steps.deployment.outputs.deployment_id }},
+              state: 'failure',
+              description: 'Deployment failed',
+              auto_inactive: false
+            });
+
+      - name: Run smoke tests
+        run: |
+          # Tests de humo post-deployment
+          curl -f https://staging-api.example.com/health || exit 1
+
+      - name: Notify Slack (staging deployment)
+        if: always()
+        uses: slackapi/slack-github-action@v1.26.0
+        with:
+          payload: |
+            {
+              "text": "🚀 Staging Deployment: ${{ job.status }}",
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "*Staging Deployment*\nStatus: `${{ job.status }}`\nCommit: `${{ github.sha }}`\nBranch: `${{ github.ref_name }}`"
+                  }
+                }
+              ]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_STAGING }}
+          SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK

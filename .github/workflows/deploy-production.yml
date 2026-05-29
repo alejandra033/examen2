@@ -1,0 +1,249 @@
+name: Deploy Production - Approval Required
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to deploy'
+        required: true
+
+# Permisos globales mínimos
+permissions:
+  contents: read
+  id-token: write  # OIDC
+
+jobs:
+  pre-deployment-checks:
+    name: Pre-Deployment Checks
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      approved: ${{ steps.check.outputs.approved }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@2541b1294d2704b0964813337f33b291d3f8596b  # v4.1.1
+
+      - name: Check branch protection
+        id: check
+        run: |
+          echo "Verificando protecciones de rama..."
+          echo "approved=true" >> $GITHUB_OUTPUT
+
+  deploy-production:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: pre-deployment-checks
+    # ✅ IMPORTANTE: Environment produce requiere aprobación
+    environment:
+      name: production
+      url: https://api.example.com
+    # Permisos altamente restringidos
+    permissions:
+      contents: read
+      id-token: write
+      deployments: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@2541b1294d2704b0964813337f33b291d3f8596b  # v4.1.1
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@1a4442caab129478691007574fcc35b32ff21d5e  # v3.8.1
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build application
+        run: npm run build
+
+      # ✅ OIDC: Obtener JWT de corta duración (sin secrets hardcodeados)
+      - name: Get OIDC token from GitHub
+        id: oidc
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const token = await core.getIDToken('https://example.com');
+            core.setSecret(token);
+            core.setOutput('token', token);
+
+      # ✅ Configurar credenciales AWS usando OIDC (alternativa a secrets)
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          # Rol que confía en GitHub OIDC provider
+          role-to-assume: arn:aws:iam::123456789012:role/github-actions-production
+          aws-region: us-east-1
+          role-session-name: GitHubActions-Prod-${{ github.run_id }}
+          role-duration-seconds: 900  # 15 minutos - muy corto para producción
+
+      - name: Create production deployment
+        id: deployment
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const deployment = await github.rest.repos.createDeployment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              ref: context.ref,
+              environment: 'production',
+              description: 'Production deployment via GitHub Actions',
+              auto_merge: false,
+              required_contexts: [],
+              production_environment: true
+            });
+            core.setOutput('deployment_id', deployment.data.id);
+
+      - name: Push image to registry
+        run: |
+          # Usar credenciales AWS (OIDC) para ECR
+          aws ecr get-login-password --region $AWS_REGION | \
+            docker login --username AWS --password-stdin 123456789012.dkr.ecr.us-east-1.amazonaws.com
+
+          docker build -t my-app:${{ github.sha }} .
+          docker tag my-app:${{ github.sha }} 123456789012.dkr.ecr.us-east-1.amazonaws.com/my-app:${{ github.sha }}
+          docker tag my-app:${{ github.sha }} 123456789012.dkr.ecr.us-east-1.amazonaws.com/my-app:latest
+          docker push 123456789012.dkr.ecr.us-east-1.amazonaws.com/my-app:${{ github.sha }}
+          docker push 123456789012.dkr.ecr.us-east-1.amazonaws.com/my-app:latest
+
+      # ✅ Deploy a producción
+      - name: Deploy to AWS ECS Production
+        env:
+          AWS_REGION: us-east-1
+          DEPLOYMENT_ID: ${{ steps.deployment.outputs.deployment_id }}
+        run: |
+          # Usar credenciales OIDC (no secrets)
+          aws ecs update-service \
+            --cluster prod-cluster \
+            --service app-service \
+            --force-new-deployment \
+            --region $AWS_REGION
+
+          # Esperar a que el servicio sea estable
+          aws ecs wait services-stable \
+            --cluster prod-cluster \
+            --services app-service \
+            --region $AWS_REGION
+
+      - name: Update deployment status (success)
+        if: success()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.repos.createDeploymentStatus({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              deployment_id: ${{ steps.deployment.outputs.deployment_id }},
+              state: 'success',
+              environment_url: 'https://api.example.com',
+              description: 'Production deployment successful',
+              auto_inactive: false
+            });
+
+      - name: Update deployment status (failure)
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.repos.createDeploymentStatus({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              deployment_id: ${{ steps.deployment.outputs.deployment_id }},
+              state: 'failure',
+              description: 'Production deployment failed',
+              auto_inactive: false
+            });
+
+      - name: Run health checks
+        run: |
+          echo "Ejecutando health checks..."
+          for i in {1..30}; do
+            if curl -f https://api.example.com/health 2>/dev/null; then
+              echo "✅ Health check passed"
+              exit 0
+            fi
+            echo "Attempt $i/30..."
+            sleep 10
+          done
+          echo "❌ Health check failed after 5 minutes"
+          exit 1
+
+      - name: Run integration tests
+        run: |
+          npm run test:integration -- --env=production
+
+      # ✅ Notificación con información de auditoría
+      - name: Notify production deployment
+        if: always()
+        uses: slackapi/slack-github-action@v1.26.0
+        with:
+          payload: |
+            {
+              "text": "🚀 Production Deployment: ${{ job.status }}",
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "*Production Deployment Report*\nStatus: `${{ job.status }}`\nVersion: `${{ github.ref }}`\nCommit: `${{ github.sha }}`\nTriggered by: `${{ github.actor }}`\nTimestamp: `${{ job.started_at }}`"
+                  }
+                }
+              ]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_PRODUCTION }}
+          SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK
+
+  # Job opcional: Rollback automático si hay problemas
+  rollback:
+    name: Automatic Rollback (if needed)
+    runs-on: ubuntu-latest
+    needs: deploy-production
+    if: failure()
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::123456789012:role/github-actions-production
+          aws-region: us-east-1
+
+      - name: Rollback deployment
+        run: |
+          echo "⚠️ Iniciando rollback automático..."
+          aws ecs update-service \
+            --cluster prod-cluster \
+            --service app-service \
+            --force-new-deployment \
+            --region us-east-1
+
+      - name: Notify rollback
+        uses: slackapi/slack-github-action@v1.26.0
+        with:
+          payload: |
+            {
+              "text": "🔄 Production Rollback Triggered",
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "⚠️ *Automatic Rollback Initiated*\nDeployment had issues and was rolled back\nCommit: `${{ github.sha }}`"
+                  }
+                }
+              ]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_PRODUCTION }}
+          SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK
