@@ -184,7 +184,7 @@ jobs:
       # ✅ Notificación con información de auditoría
       - name: Notify production deployment
         if: always()
-        uses: slackapi/slack-github-action@v1.26.0
+        uses: slackapi/slack-github-action@v3.0.3
         with:
           payload: |
             {
@@ -229,7 +229,7 @@ jobs:
             --region us-east-1
 
       - name: Notify rollback
-        uses: slackapi/slack-github-action@v1.26.0
+        uses: slackapi/slack-github-action@v3.0.3
         with:
           payload: |
             {
