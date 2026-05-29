@@ -118,7 +118,7 @@ jobs:
         uses: actions/checkout@2541b1294d2704b0964813337f33b291d3f8596b  # v4.1.1
 
       - name: SLSA Provenance Generation
-        uses: slsa-framework/slsa-github-generator/.github/workflows/generator_container_slsa3.yml@v1.10.0
+        uses: slsa-framework/slsa-github-generator/.github/workflows/generator_container_slsa3.yml@v2.1.0
         with:
           image: ghcr.io/example/app:latest
           registry-username: ${{ github.actor }}
