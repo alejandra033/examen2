@@ -122,7 +122,7 @@ jobs:
         with:
           payload: |
             {
-              "text": "🚀 Staging Deployment: ${{ job.status }}",
+              "text": " Staging Deployment: ${{ job.status }}",
               "blocks": [
                 {
                   "type": "section",
